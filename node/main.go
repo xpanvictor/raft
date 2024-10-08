@@ -6,6 +6,7 @@ import (
 	"github.com/xpanvictor/raft/commons"
 	pb "github.com/xpanvictor/raft/protoc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"log"
 	"net"
 	"os"
@@ -97,10 +98,44 @@ func (n *Node) operate(quit chan os.Signal) {
 		select {
 		case <-n.ticker.C:
 			// TODO: here is where Leader election starts
+			n.declareCandidate()
 			log.Printf("Ticker ticked")
 		case sig := <-quit:
 			log.Printf("Node got call %s", sig)
 			return // track signal later
 		}
 	}
+}
+
+func (n *Node) declareCandidate() {
+	// say address is mine + 1
+	nextPort := n.port + 1
+	conn, err := grpc.NewClient(fmt.Sprintf(":%d", nextPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	log.Printf("Calling %d", nextPort)
+	if err != nil {
+		log.Fatalf("Can't send connection")
+	}
+	defer conn.Close()
+
+	c := pb.NewRaftServiceClient(conn)
+
+	// make context for reqs
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	// contact addr
+	li := len(n.logs) - 1
+	lastLogIndex := 0
+	if li > 0 {
+		lastLogIndex = li
+	}
+	d, err := c.RequestVote(ctx, &pb.VoteRequest{
+		Term:         int32(n.currentTerm),
+		CandidateId:  int32(n.id),
+		LastLogTerm:  0, // int32((*n.logs[lastLogIndex]).term)
+		LastLogIndex: int32(lastLogIndex),
+	})
+	if err != nil {
+		log.Printf("Error declaring node: %d as leader, %v", n.id, err)
+	}
+	log.Printf("Response, %v", d)
 }
