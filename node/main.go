@@ -39,13 +39,31 @@ type Node struct {
 
 type server struct {
 	pb.UnimplementedRaftServiceServer
+	nd *Node
 }
 
 func (s *server) RequestVote(_ context.Context, in *pb.VoteRequest) (*pb.VoteResponse, error) {
+	log.Printf("Node %v: Got a request from node %v", s.nd.id, in.CandidateId)
+	vote := s.nd.checkVote(in)
 	return &pb.VoteResponse{
 		CurrentTerm: 0,
-		VoteGranted: false,
+		VoteGranted: vote,
 	}, nil
+}
+
+func (n *Node) checkVote(vr *pb.VoteRequest) bool {
+	if n.currentTerm > commons.Term(vr.Term) {
+		// if node votedFor is nil or candidate id, proceed
+		cid := commons.NodeID(vr.CandidateId)
+		if n.votedFor == 0 || n.votedFor == cid {
+			// check if log is up to date
+			if n.lastCommited <= commons.Index(vr.LastLogIndex) {
+				n.votedFor = cid
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func NewNode(id commons.NodeID, actionTimeout time.Duration, port commons.Port, ch chan os.Signal) *Node {
@@ -78,7 +96,7 @@ func (n *Node) startNode(quit chan os.Signal) {
 	s := grpc.NewServer()
 	defer s.Stop()
 
-	pb.RegisterRaftServiceServer(s, &server{})
+	pb.RegisterRaftServiceServer(s, &server{nd: n})
 	log.Printf("GRPC Server listening at %v", lis.Addr())
 	// run server
 	if err := s.Serve(lis); err != nil {
@@ -123,11 +141,11 @@ func (n *Node) declareCandidate() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	// contact addr
-	li := len(n.logs) - 1
-	lastLogIndex := 0
-	if li > 0 {
-		lastLogIndex = li
-	}
+	lastLogIndex := len(n.logs) - 1
+
+	// update currentTerm and request vote
+	n.currentTerm += 1
+
 	d, err := c.RequestVote(ctx, &pb.VoteRequest{
 		Term:         int32(n.currentTerm),
 		CandidateId:  int32(n.id),
@@ -137,5 +155,5 @@ func (n *Node) declareCandidate() {
 	if err != nil {
 		log.Printf("Error declaring node: %d as leader, %v", n.id, err)
 	}
-	log.Printf("Response, %v", d)
+	log.Printf("Response, %d, voted: %v", d.CurrentTerm, d.VoteGranted)
 }
