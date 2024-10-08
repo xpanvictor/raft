@@ -19,17 +19,20 @@ var rw sync.Mutex
 
 // LogEntry Each entry in a log
 type LogEntry struct {
-	term    int32
-	command string
+	term     commons.Term
+	commands []*commons.Command
 }
 
 // Node The Node's state
 type Node struct {
-	id          int32
-	currentTerm int32
-	votedFor    int32
+	id          commons.NodeID
+	currentTerm commons.Term
+	votedFor    commons.NodeID
 	logs        []*LogEntry
-	port        int32
+	port        commons.Port
+	// volatile state
+	lastCommited commons.Index
+	lastApplied  commons.Index
 }
 
 type server struct {
@@ -60,7 +63,7 @@ func (n *Node) startNode(port commons.Port) {
 	pb.RegisterRaftServiceServer(s, &server{})
 	log.Printf("Server listening at %v", lis.Addr())
 	// run server
-	if err := s.Serve(lis); err != nill {
+	if err := s.Serve(lis); err != nil {
 		log.Fatalf("Can't serve listener, %v", err)
 	}
 }
