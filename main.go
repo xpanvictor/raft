@@ -20,8 +20,8 @@ var (
 )
 
 var (
-	port        = flag.Int("port", 5000, "The starting port")
-	serverCount = flag.Int("server_count", 5, "The amount of servers to deploy")
+	nodesUrlFile = flag.String("nodes_url_file", "nodes.txt", "The file containing all nodes url")
+	newClient    = flag.Bool("new_client", false, "To just add another client to a running system")
 )
 
 func main() {
@@ -29,9 +29,18 @@ func main() {
 	log.Printf("Starting server")
 	ch := make(chan os.Signal)
 	// will create  nodes
-	for i := 0; i < *serverCount; i++ {
-		go raft.NewNode(commons.NodeID(i), configs.ELECTION_TIMEOUT, commons.Port(*port+i), ch)
+	// creates the nodesUrlFile
+	file, err := os.OpenFile(*nodesUrlFile, os.O_RDWR, 0644)
+	if err != nil {
+		log.Fatalf("Unable to create nodes url file %v", err)
 	}
+	defer file.Close()
+	// Use the seed nodes to initiate the system
+	seedNodes := commons.ArrStrFromFile(file)
+	for i, addr := range seedNodes {
+		raft.NewNode(commons.NodeID(i), configs.ELECTION_TIMEOUT, addr, ch)
+	}
+
 	signal.Notify(ch, syscall.SIGINT)
 	signal.Notify(ch, syscall.SIGKILL)
 	caughtSignal := <-ch

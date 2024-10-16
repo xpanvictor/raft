@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -29,7 +30,7 @@ type Node struct {
 	currentTerm commons.Term
 	votedFor    commons.NodeID
 	logs        []*LogEntry
-	port        commons.Port
+	addr        commons.Addr
 	// volatile state
 	lastCommited commons.Index
 	lastApplied  commons.Index
@@ -43,8 +44,13 @@ type server struct {
 }
 
 func (s *server) RequestVote(_ context.Context, in *pb.VoteRequest) (*pb.VoteResponse, error) {
-	log.Printf("Node %v: Got a request from node %v", s.nd.id, in.CandidateId)
-	vote := s.nd.checkVote(in)
+	nd := s.nd
+	if nd == nil {
+		return nil, fmt.Errorf("node not found")
+	}
+	log.Printf("Node %v: Got a request from node %v", nd.id, in.CandidateId)
+	vote := nd.checkVote(in)
+	log.Printf("Node %v: processed from  node %v", nd.id, in.CandidateId)
 	return &pb.VoteResponse{
 		CurrentTerm: 0,
 		VoteGranted: vote,
@@ -66,13 +72,17 @@ func (n *Node) checkVote(vr *pb.VoteRequest) bool {
 	return false
 }
 
-func NewNode(id commons.NodeID, actionTimeout time.Duration, port commons.Port, ch chan os.Signal) *Node {
+func NewNode(id commons.NodeID, actionTimeout time.Duration, addr string, ch chan os.Signal) *Node {
+	a, err := url.Parse(addr)
+	if err != nil {
+		log.Fatalf("Cannot parse addr %v", err)
+	}
 	nd := &Node{
 		id:           id,
 		currentTerm:  0,
 		votedFor:     0,
 		logs:         nil,
-		port:         port,
+		addr:         commons.Addr(a.String()),
 		lastCommited: 0,
 		lastApplied:  0,
 		ticker:       *time.NewTicker(actionTimeout),
@@ -89,12 +99,14 @@ func NewNode(id commons.NodeID, actionTimeout time.Duration, port commons.Port, 
 func (n *Node) startNode(quit chan os.Signal) {
 	// start the grpc server
 	// listen for tcp
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", n.port))
+	lis, err := net.Listen("tcp", n.addr.GetHost())
 	if err != nil {
 		log.Fatalf("Node failed to listen, %v", err)
 	}
 	s := grpc.NewServer()
 	defer s.Stop()
+
+	log.Printf("Listener at %v", lis.Addr().Network())
 
 	pb.RegisterRaftServiceServer(s, &server{nd: n})
 	log.Printf("GRPC Server listening at %v", lis.Addr())
@@ -115,7 +127,7 @@ func (n *Node) operate(quit chan os.Signal) {
 	for {
 		select {
 		case <-n.ticker.C:
-			// TODO: here is where Leader election starts
+			// TODO: Declare candidateship or send heartbeat
 			n.declareCandidate()
 			log.Printf("Ticker ticked")
 		case sig := <-quit:
@@ -127,7 +139,8 @@ func (n *Node) operate(quit chan os.Signal) {
 
 func (n *Node) declareCandidate() {
 	// say address is mine + 1
-	nextPort := n.port + 1
+
+	nextPort := 5001
 	conn, err := grpc.NewClient(fmt.Sprintf(":%d", nextPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	log.Printf("Calling %d", nextPort)
 	if err != nil {
@@ -152,8 +165,11 @@ func (n *Node) declareCandidate() {
 		LastLogTerm:  0, // int32((*n.logs[lastLogIndex]).term)
 		LastLogIndex: int32(lastLogIndex),
 	})
-	if err != nil {
+	if err != nil || d == nil {
 		log.Printf("Error declaring node: %d as leader, %v", n.id, err)
+		return
 	}
+
 	log.Printf("Response, %d, voted: %v", d.CurrentTerm, d.VoteGranted)
+	log.Println("Move")
 }
