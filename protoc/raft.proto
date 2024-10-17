@@ -8,7 +8,7 @@ service RaftService {
   // request vote
   rpc RequestVote (VoteRequest) returns (VoteResponse) {}
   // append entity
-  rpc AppendEntity (AppendEntityRequest) returns (AppendEntityResponse) {}
+  rpc AppendEntry (AppendEntryRequest) returns (AppendEntryResponse) {}
 }
 
 message VoteRequest {
@@ -23,7 +23,7 @@ message VoteResponse {
   bool voteGranted = 2;
 }
 
-message AppendEntityRequest {
+message AppendEntryRequest {
   int32 term = 1;
   int32 leaderId = 2;
   int32 prevLogIndex = 3;
@@ -32,7 +32,7 @@ message AppendEntityRequest {
   int32 leaderCommit = 6;
 }
 
-message AppendEntityResponse {
+message AppendEntryResponse {
   int32 term = 1;
   bool success = 2;
 }

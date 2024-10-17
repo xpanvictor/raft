@@ -60,6 +60,16 @@ func (s *server) RequestVote(_ context.Context, in *pb.VoteRequest) (*pb.VoteRes
 	}, nil
 }
 
+func (s *server) AppendEntry(_ context.Context, in *pb.AppendEntryRequest) (*pb.AppendEntryResponse, error) {
+	nd := s.nd
+	// TODO: check if is heartbeat, respond differently
+
+	return &pb.AppendEntryResponse{
+		Term:    int32(nd.currentTerm),
+		Success: false,
+	}, nil
+}
+
 func (n *Node) checkVote(vr *pb.VoteRequest) bool {
 	if n.currentTerm < commons.Term(vr.Term) {
 		// if node votedFor is nil or candidate id, proceed
@@ -189,6 +199,12 @@ func (n *Node) handleElection() {
 	}
 }
 
+func (n *Node) handleAppendEntries(entries []string) {
+	n.applyToNodes(func(s string) {
+		n.sendAppendEntries(s, entries)
+	})
+}
+
 func (n *Node) declareCandidate(addr string) *pb.VoteResponse {
 
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -221,6 +237,38 @@ func (n *Node) declareCandidate(addr string) *pb.VoteResponse {
 	}
 
 	n.log("Response, %d, voted: %v", d.CurrentTerm, d.VoteGranted)
+
+	return d
+}
+
+func (n *Node) sendAppendEntries(addr string, entries []string) *pb.AppendEntryResponse {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("Can't send entry connection!")
+	}
+	defer conn.Close()
+
+	// make context for req
+	c := pb.NewRaftServiceClient(conn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	// send rpc request
+	lastLogIndex := len(n.logs) - 1
+	d, err := c.AppendEntry(ctx, &pb.AppendEntryRequest{
+		Term:         int32(n.currentTerm),
+		LeaderId:     int32(n.votedFor),
+		PrevLogIndex: int32(lastLogIndex),
+		PrevLogTerm:  int32(n.lastCommited),
+		Entries:      entries,
+		LeaderCommit: 0,
+	})
+
+	if err != nil {
+		n.log("Error declaring node: %d as leader, %v", n.id, err)
+		return d // FIXME: add err management
+	}
 
 	return d
 }
