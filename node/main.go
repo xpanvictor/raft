@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/xpanvictor/raft/commons"
+	"github.com/xpanvictor/raft/configs"
 	pb "github.com/xpanvictor/raft/protoc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -24,6 +25,14 @@ type LogEntry struct {
 	commands []*commons.Command
 }
 
+type NodeState int
+
+const (
+	FOLLOWER NodeState = iota
+	CANDIDATE
+	LEADER
+)
+
 // Node The Node's state
 type Node struct {
 	id          commons.NodeID
@@ -36,7 +45,10 @@ type Node struct {
 	lastCommited commons.Index
 	lastApplied  commons.Index
 	// ticker
-	ticker time.Ticker
+	ticker          time.Ticker
+	heartbeatTicker time.Ticker
+	electionTimeout time.Duration
+	nodeState       NodeState
 	// For testing
 	allowedToLog map[int32]struct{}
 }
@@ -49,11 +61,11 @@ type server struct {
 func (s *server) RequestVote(_ context.Context, in *pb.VoteRequest) (*pb.VoteResponse, error) {
 	nd := s.nd
 	if nd == nil {
-		return nil, fmt.Errorf("node not found")
+		return nil, fmt.Errorf("Node not found")
 	}
-	nd.log("Got a request from node %v", in.CandidateId)
+	//nd.log("Got a request from node %v", in.CandidateId)
 	vote := nd.checkVote(in)
-	nd.log("Processed from node %v", in.CandidateId)
+	//nd.log("Processed from node %v", in.CandidateId)
 	return &pb.VoteResponse{
 		CurrentTerm: int32(nd.currentTerm),
 		VoteGranted: vote,
@@ -62,7 +74,26 @@ func (s *server) RequestVote(_ context.Context, in *pb.VoteRequest) (*pb.VoteRes
 
 func (s *server) AppendEntry(_ context.Context, in *pb.AppendEntryRequest) (*pb.AppendEntryResponse, error) {
 	nd := s.nd
+	nd.log("Master acknowledged: %v", in.LeaderId)
+
+	// reset timer
+	//wg := sync.WaitGroup{}
+	//wg.Add(1)
+	//go func() {
+	//	defer wg.Done()
+	//	nd.ticker.Stop()
+	//}()
+	//wg.Wait()
+	//defer nd.ticker.Reset(nd.electionTimeout)
+	nd.ticker = *time.NewTicker(nd.electionTimeout)
+
+	log.Println("An end; e")
+	if commons.NodeID(in.LeaderId) == nd.id {
+		// nothing special actually
+	}
 	// TODO: check if is heartbeat, respond differently
+	nd.log("I conform to %d", in.LeaderId)
+	nd.nodeState = FOLLOWER
 
 	return &pb.AppendEntryResponse{
 		Term:    int32(nd.currentTerm),
@@ -101,19 +132,22 @@ func NewNode(id commons.NodeID, actionTimeout time.Duration, addr string, _nodeA
 	}
 
 	allowedToLog := map[int32]struct{}{
-		99: {},
+		//0: {}, // only leader
 	}
 
 	nd := &Node{
-		id:           id,
-		currentTerm:  0,
-		votedFor:     0,
-		logs:         nil,
-		addr:         commons.Addr(a.String()),
-		nodesAddrs:   nodeAddrs,
-		lastCommited: 0,
-		lastApplied:  0,
-		ticker:       *time.NewTicker(actionTimeout),
+		id:              id,
+		currentTerm:     0,
+		votedFor:        0,
+		logs:            nil,
+		addr:            commons.Addr(a.String()),
+		nodesAddrs:      nodeAddrs,
+		lastCommited:    0,
+		lastApplied:     0,
+		nodeState:       FOLLOWER,
+		electionTimeout: actionTimeout,
+		ticker:          *time.NewTicker(actionTimeout),
+		heartbeatTicker: *time.NewTicker(configs.HEARTBEAT_TIMEOUT),
 		// testing
 		allowedToLog: allowedToLog,
 	}
@@ -126,10 +160,17 @@ func NewNode(id commons.NodeID, actionTimeout time.Duration, addr string, _nodeA
 }
 
 func (n *Node) log(fmtLog string, args ...interface{}) {
+	isLeader := n.nodeState == LEADER
 	if _, ok := n.allowedToLog[int32(n.id)]; !ok && len(n.allowedToLog) > 0 {
-		return
+		// !(a & b) == !a + !b
+		if _, ok := n.allowedToLog[0]; !ok || !isLeader {
+			return
+		}
 	}
 	prefix := fmt.Sprintf("Node %d: ", n.id)
+	if isLeader {
+		prefix = fmt.Sprintf("(L)>%v", prefix)
+	}
 	msg := fmt.Sprintf(fmtLog, args...)
 	log.Printf("%s%s", prefix, msg)
 }
@@ -167,8 +208,13 @@ func (n *Node) operate(quit chan os.Signal) {
 		select {
 		case <-n.ticker.C:
 			// TODO: Declare candidateship or send heartbeat
+			n.log("An end?")
 			n.handleElection()
 			n.log("Ticker ticked")
+		case <-n.heartbeatTicker.C:
+			if n.nodeState == LEADER {
+				n.handleAppendEntries(nil)
+			}
 		case sig := <-quit:
 			n.log("Node got call %s", sig)
 			return // track signal later
@@ -186,6 +232,7 @@ func (n *Node) applyToNodes(fn func(string)) {
 func (n *Node) sendToMaster() {}
 
 func (n *Node) handleElection() {
+	n.nodeState = CANDIDATE
 	count := 0
 	n.applyToNodes(func(s string) {
 		d := n.declareCandidate(s)
@@ -196,10 +243,16 @@ func (n *Node) handleElection() {
 	if commons.HasPriorityVotes(len(n.nodesAddrs), count) {
 		log.Printf("Node %d: Vote managed, count: %d", n.id, count)
 		// TODO: declare leadership by sending heartbeat
+		n.log("-----------> I am leader")
+		n.nodeState = LEADER
+		n.handleAppendEntries(nil)
 	}
 }
 
 func (n *Node) handleAppendEntries(entries []string) {
+	if entries == nil {
+		n.log("Heartbeat")
+	}
 	n.applyToNodes(func(s string) {
 		n.sendAppendEntries(s, entries)
 	})
@@ -231,8 +284,8 @@ func (n *Node) declareCandidate(addr string) *pb.VoteResponse {
 		LastLogTerm:  0, // int32((*n.logs[lastLogIndex]).term)
 		LastLogIndex: int32(lastLogIndex),
 	})
-	if err != nil || d == nil {
-		n.log("Error declaring node: %d as leader, %v", n.id, err)
+	if err != nil {
+		n.log("Error declaring node: as candidate to %s, %v", addr, err)
 		return d // FIXME: add err management
 	}
 
@@ -258,7 +311,7 @@ func (n *Node) sendAppendEntries(addr string, entries []string) *pb.AppendEntryR
 	lastLogIndex := len(n.logs) - 1
 	d, err := c.AppendEntry(ctx, &pb.AppendEntryRequest{
 		Term:         int32(n.currentTerm),
-		LeaderId:     int32(n.votedFor),
+		LeaderId:     int32(n.id), // is it my id since I'm leader ???
 		PrevLogIndex: int32(lastLogIndex),
 		PrevLogTerm:  int32(n.lastCommited),
 		Entries:      entries,
@@ -266,9 +319,10 @@ func (n *Node) sendAppendEntries(addr string, entries []string) *pb.AppendEntryR
 	})
 
 	if err != nil {
-		n.log("Error declaring node: %d as leader, %v", n.id, err)
+		n.log("Error sending entry to %v, %v", addr, err)
 		return d // FIXME: add err management
 	}
+	n.log("Sent to %v; resp: %b", addr, d.Success)
 
 	return d
 }
