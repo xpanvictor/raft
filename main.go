@@ -38,7 +38,8 @@ func main() {
 	// Use the seed nodes to initiate the system
 	seedNodes := commons.ArrStrFromFile(file)
 	for i, addr := range seedNodes {
-		raft.NewNode(commons.NodeID(i), configs.ELECTION_TIMEOUT, addr, seedNodes, ch)
+		// avoid 0 for initial node
+		raft.NewNode(commons.NodeID(i+1), configs.ELECTION_TIMEOUT, addr, seedNodes, ch)
 	}
 
 	signal.Notify(ch, syscall.SIGINT)
