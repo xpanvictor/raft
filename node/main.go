@@ -17,7 +17,6 @@ import (
 )
 
 var done bool
-var rw sync.Mutex
 
 // LogEntry Each entry in a log
 type LogEntry struct {
@@ -45,6 +44,7 @@ type Node struct {
 	lastCommited commons.Index
 	lastApplied  commons.Index
 	// ticker
+	rw              sync.Mutex // holding tickers
 	ticker          time.Ticker
 	heartbeatTicker time.Ticker
 	electionTimeout time.Duration
@@ -84,16 +84,17 @@ func (s *server) AppendEntry(_ context.Context, in *pb.AppendEntryRequest) (*pb.
 	//	nd.ticker.Stop()
 	//}()
 	//wg.Wait()
-	//defer nd.ticker.Reset(nd.electionTimeout)
-	nd.ticker = *time.NewTicker(nd.electionTimeout)
+	//nd.ticker.Stop()
+	//nd.ticker = *time.NewTicker(nd.electionTimeout)
 
-	log.Println("An end; e")
-	if commons.NodeID(in.LeaderId) == nd.id {
-		// nothing special actually
+	if commons.NodeID(in.LeaderId) != nd.id {
+		nd.log("I conform to %d", in.LeaderId)
+		nd.nodeState = FOLLOWER
 	}
 	// TODO: check if is heartbeat, respond differently
-	nd.log("I conform to %d", in.LeaderId)
-	nd.nodeState = FOLLOWER
+
+	//nd.tickerReset <- "election"
+	nd.ticker = *time.NewTicker(nd.electionTimeout)
 
 	return &pb.AppendEntryResponse{
 		Term:    int32(nd.currentTerm),
@@ -145,6 +146,7 @@ func NewNode(id commons.NodeID, actionTimeout time.Duration, addr string, _nodeA
 		lastCommited:    0,
 		lastApplied:     0,
 		nodeState:       FOLLOWER,
+		rw:              sync.Mutex{},
 		electionTimeout: actionTimeout,
 		ticker:          *time.NewTicker(actionTimeout),
 		heartbeatTicker: *time.NewTicker(configs.HEARTBEAT_TIMEOUT),
@@ -207,10 +209,8 @@ func (n *Node) operate(quit chan os.Signal) {
 	for {
 		select {
 		case <-n.ticker.C:
-			// TODO: Declare candidateship or send heartbeat
-			n.log("An end?")
+			// Declare candidateship
 			n.handleElection()
-			n.log("Ticker ticked")
 		case <-n.heartbeatTicker.C:
 			if n.nodeState == LEADER {
 				n.handleAppendEntries(nil)
@@ -233,6 +233,7 @@ func (n *Node) sendToMaster() {}
 
 func (n *Node) handleElection() {
 	n.nodeState = CANDIDATE
+	n.log("+++++++++++++++++++ Election period from %d", n.id)
 	count := 0
 	n.applyToNodes(func(s string) {
 		d := n.declareCandidate(s)
@@ -261,7 +262,7 @@ func (n *Node) handleAppendEntries(entries []string) {
 func (n *Node) declareCandidate(addr string) *pb.VoteResponse {
 
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	n.log("Declare candidateship to %v", addr)
+	n.log("Declaring candidateship to %v", addr)
 	if err != nil {
 		log.Fatalf("Can't send connection")
 	}
