@@ -252,9 +252,7 @@ func (n *Node) handleElection() {
 	// Perform metric on fn
 	t1 := time.Now()
 	n.applyToNodes(func(s string) {
-		// hold access to update count
-		n.rw.Lock()
-		defer n.rw.Unlock()
+		// not necessary to hold access to update count
 		d := n.declareCandidate(s)
 		if d.VoteGranted {
 			// using atomic increment for count
