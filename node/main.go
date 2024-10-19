@@ -72,6 +72,13 @@ func (s *server) RequestVote(_ context.Context, in *pb.VoteRequest) (*pb.VoteRes
 	}, nil
 }
 
+func (n *Node) swapAndCleanTicker(t1 *time.Ticker) {
+	t2 := n.ticker
+	n.ticker = *t1
+	t2.Stop()
+	<-t2.C // drain the channel
+}
+
 func (s *server) AppendEntry(_ context.Context, in *pb.AppendEntryRequest) (*pb.AppendEntryResponse, error) {
 	nd := s.nd
 	nd.log("Master acknowledged: %v", in.LeaderId)
@@ -85,7 +92,6 @@ func (s *server) AppendEntry(_ context.Context, in *pb.AppendEntryRequest) (*pb.
 	//}()
 	//wg.Wait()
 	//nd.ticker.Stop()
-	//nd.ticker = *time.NewTicker(nd.electionTimeout)
 
 	if commons.NodeID(in.LeaderId) != nd.id {
 		nd.log("I conform to %d", in.LeaderId)
@@ -93,7 +99,7 @@ func (s *server) AppendEntry(_ context.Context, in *pb.AppendEntryRequest) (*pb.
 	}
 	// TODO: check if is heartbeat, respond differently
 
-	//nd.tickerReset <- "election"
+	//nd.swapAndCleanTicker(time.NewTicker(nd.electionTimeout))
 	nd.ticker = *time.NewTicker(nd.electionTimeout)
 
 	return &pb.AppendEntryResponse{
@@ -222,11 +228,18 @@ func (n *Node) operate(quit chan os.Signal) {
 	}
 }
 
+// will use routines to apply to all nodes
 func (n *Node) applyToNodes(fn func(string)) {
 	n.log("------------Operation------")
+	wg := sync.WaitGroup{}
 	for _, addr := range n.nodesAddrs {
 		fn(addr.GetHost())
+		//wg.Add(1)
+		//go func(addr commons.Addr) {
+		//	defer wg.Done()
+		//}(addr)
 	}
+	wg.Wait()
 }
 
 func (n *Node) sendToMaster() {}
@@ -235,15 +248,22 @@ func (n *Node) handleElection() {
 	n.nodeState = CANDIDATE
 	n.log("+++++++++++++++++++ Election period from %d", n.id)
 	count := 0
+	// Perform metric on fn
+	t1 := time.Now()
 	n.applyToNodes(func(s string) {
+		// hold access to update count
+		n.rw.Lock()
+		defer n.rw.Unlock()
 		d := n.declareCandidate(s)
 		if d.VoteGranted {
 			count++
 		}
+		n.log("Count on %v: %v", n.currentTerm, count)
 	})
+	n.log("___--------_______--------_______-------_______-----____---> Election time: %v", time.Since(t1))
 	if commons.HasPriorityVotes(len(n.nodesAddrs), count) {
 		log.Printf("Node %d: Vote managed, count: %d", n.id, count)
-		// TODO: declare leadership by sending heartbeat
+		// declare leadership by sending heartbeat
 		n.log("-----------> I am leader")
 		n.nodeState = LEADER
 		n.handleAppendEntries(nil)
@@ -323,7 +343,7 @@ func (n *Node) sendAppendEntries(addr string, entries []string) *pb.AppendEntryR
 		n.log("Error sending entry to %v, %v", addr, err)
 		return d // FIXME: add err management
 	}
-	n.log("Sent to %v; resp: %b", addr, d.Success)
+	n.log("Sent to %v; resp: %v", addr, d.Success)
 
 	return d
 }
