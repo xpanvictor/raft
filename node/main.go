@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -228,16 +229,16 @@ func (n *Node) operate(quit chan os.Signal) {
 	}
 }
 
-// will use routines to apply to all nodes
+// using routines to apply to all nodes
 func (n *Node) applyToNodes(fn func(string)) {
 	n.log("------------Operation------")
 	wg := sync.WaitGroup{}
 	for _, addr := range n.nodesAddrs {
-		fn(addr.GetHost())
-		//wg.Add(1)
-		//go func(addr commons.Addr) {
-		//	defer wg.Done()
-		//}(addr)
+		wg.Add(1)
+		go func(addr commons.Addr) {
+			defer wg.Done()
+			fn(addr.GetHost())
+		}(addr)
 	}
 	wg.Wait()
 }
@@ -247,7 +248,7 @@ func (n *Node) sendToMaster() {}
 func (n *Node) handleElection() {
 	n.nodeState = CANDIDATE
 	n.log("+++++++++++++++++++ Election period from %d", n.id)
-	count := 0
+	var count int32
 	// Perform metric on fn
 	t1 := time.Now()
 	n.applyToNodes(func(s string) {
@@ -256,12 +257,14 @@ func (n *Node) handleElection() {
 		defer n.rw.Unlock()
 		d := n.declareCandidate(s)
 		if d.VoteGranted {
-			count++
+			// using atomic increment for count
+			atomic.AddInt32(&count, 1)
 		}
 		n.log("Count on %v: %v", n.currentTerm, count)
 	})
 	n.log("___--------_______--------_______-------_______-----____---> Election time: %v", time.Since(t1))
-	if commons.HasPriorityVotes(len(n.nodesAddrs), count) {
+	count = atomic.LoadInt32(&count)
+	if commons.HasPriorityVotes(len(n.nodesAddrs), int(count)) {
 		log.Printf("Node %d: Vote managed, count: %d", n.id, count)
 		// declare leadership by sending heartbeat
 		n.log("-----------> I am leader")
